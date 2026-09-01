@@ -1,0 +1,12 @@
+{
+  "dismissal_time": "16:30",
+  "tts_rate": 175,
+  "tts_volume": 1.0,
+  "popup_min_hold_seconds": 12,
+  "rules": {
+    "daily": { "enabled": true, "lead_minutes": 1, "title": "放学安全提醒" },
+    "friday": { "enabled": true, "lead_minutes": 5, "title": "周末安全专题" },
+    "holiday": { "enabled": true, "lead_minutes": 30, "title": "节假日安全专题" }
+  },
+  "upcoming_holidays": ["2026-10-01", "2026-10-02", "2027-01-01"]
+}

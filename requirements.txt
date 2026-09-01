@@ -1,0 +1,7 @@
+comtypes==1.4.16
+pillow==12.3.0
+pypiwin32==223
+pystray==0.19.5
+pyttsx3==2.99
+pywin32==312
+six==1.17.0

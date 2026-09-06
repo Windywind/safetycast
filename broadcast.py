@@ -12,6 +12,7 @@ import datetime
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -123,42 +124,138 @@ def log_broadcast(kind: str, title: str, text: str, status: str):
 
 # ---------- TTS ----------
 
-def speak(text: str):
-    """每次新建 engine 避免 runAndWait 状态残留导致后续静音。"""
+_tts_stop = threading.Event()   # 置位后立刻停止朗读
+# 分句粒度决定「关窗后多久静音」。只按句号切分的话，
+# 防溺水那种 90 字长句要念 30 秒才停 —— 故逗号/冒号也切。
+# 不切「、」：它常用于「一、」「二、」这类序号，切开会被念成孤字。
+_SENT_SPLIT = re.compile(r"(?<=[。！？；，：!?;,:])")
+
+
+def _split_sentences(text: str):
+    """按标点细切成 3~20 字的小段。
+
+    pyttsx3 的 runAndWait 无法从外部可靠打断，只能逐段播放、
+    段间检查停止标志，最坏延迟一段（约 5 秒）。
+    """
+    out = []
+    for s in _SENT_SPLIT.split(text):
+        s = s.strip()
+        if not s:
+            continue
+        # 换行也切开，避免一段里夹着多个自然段
+        for part in s.split("\n"):
+            part = part.strip()
+            if part:
+                out.append(part)
+    return out
+
+
+def _new_engine():
+    engine = pyttsx3.init()
+    engine.setProperty("rate", CONFIG["tts_rate"])
+    engine.setProperty("volume", CONFIG["tts_volume"])
+    return engine
+
+
+def _safe_stop(engine):
+    if engine is not None:
+        try:
+            engine.stop()
+        except Exception:
+            pass
+    return None
+
+
+def speak(text: str, stop_event: threading.Event | None = None):
+    """逐句朗读；stop_event 置位后立刻停止（关窗即静音）。"""
+    stop = stop_event if stop_event is not None else threading.Event()
+    engine = None
     try:
-        engine = pyttsx3.init()
-        engine.setProperty("rate", CONFIG["tts_rate"])
-        engine.setProperty("volume", CONFIG["tts_volume"])
-        engine.say(text)
-        engine.runAndWait()
-        engine.stop()
-    except Exception as e:
-        _dbg(f"[tts] failed: {e}")
-        print(f"[tts] failed: {e}")
+        for sent in _split_sentences(text):
+            if stop.is_set():
+                break
+            try:
+                if engine is None:
+                    engine = _new_engine()
+                engine.say(sent)
+                engine.runAndWait()
+            except Exception as e:
+                # runAndWait 状态残留时重建 engine 重试本句
+                _dbg(f"[tts] retry with new engine: {e}")
+                engine = _safe_stop(engine)
+                if stop.is_set():
+                    break
+                try:
+                    engine = _new_engine()
+                    engine.say(sent)
+                    engine.runAndWait()
+                except Exception as e2:
+                    _dbg(f"[tts] sentence dropped: {e2}")
+                    engine = _safe_stop(engine)
+    finally:
+        _safe_stop(engine)
+
+
+def stop_speaking():
+    """请求停止当前语音播报。"""
+    _tts_stop.set()
 
 # ---------- 弹窗 ----------
 
-from popup_win import show_popup as _show_popup
-
-def show_popup(title: str, text: str):
-    """全屏红底弹窗，阻塞直到关闭（Win32 消息循环必须在创建它的线程跑）。"""
-    hold = CONFIG.get("popup_min_hold_seconds", 12)
-    _show_popup(title, text, hold_seconds=hold)
+from popup_win import show_popup as _show_popup, close_popup as _close_popup
 
 # ---------- 播报执行 ----------
 
+_broadcast_lock = threading.Lock()
+
+
 def do_broadcast(kind: str):
+    """执行一次播报。同一时刻只允许一个（托盘单击会连发多条鼠标消息）。
+
+    必须在工作线程中调用：内部会阻塞跑弹窗消息循环 + 等 TTS 念完。
+    """
+    if not _broadcast_lock.acquire(blocking=False):
+        _dbg(f"[broadcast] 已有播报在进行，忽略本次 {kind}")
+        return
+    try:
+        _run_broadcast(kind)
+    except Exception:
+        _dbg("[broadcast] error:\n" + traceback.format_exc())
+    finally:
+        _broadcast_lock.release()
+
+
+def _run_broadcast(kind: str):
     now = datetime.datetime.now()
     title, text = pick_content(kind, now)
     log_broadcast(kind, title, text, "开始")
-    # 弹窗在子线程跑（阻塞，但只阻塞该子线程）
-    popup_thread = threading.Thread(
-        target=show_popup, args=(title, text), daemon=True)
-    popup_thread.start()
-    # TTS 在主线程同步播放（等弹窗线程先起来）
-    time.sleep(0.3)
-    speak(text)
-    log_broadcast(kind, title, text, "已播报")
+
+    _tts_stop.clear()
+    tts_done = threading.Event()
+
+    def _tts_worker():
+        try:
+            speak(text, _tts_stop)
+        finally:
+            tts_done.set()
+
+    tts_thread = threading.Thread(target=_tts_worker, daemon=True)
+    tts_thread.start()
+
+    hold = CONFIG.get("popup_min_hold_seconds", 12)
+    manual_close = True
+    try:
+        # 弹窗在当前工作线程跑消息循环；TTS 念完且到最短停留时间才自动关闭
+        _show_popup(title, text, hold_seconds=hold,
+                    should_close=tts_done.is_set)
+    finally:
+        manual_close = not tts_done.is_set()
+        _tts_stop.set()                 # 关窗（× / ESC）后立即停音
+        _close_popup()                  # 兜底：确保弹窗已销毁
+        # 最长一段约 20 字 ≈ 7 秒语音，留足余量等它自然收尾
+        tts_thread.join(timeout=12)
+
+    log_broadcast(kind, title, text, "手动关闭" if manual_close else "已播报")
 
 # ---------- 调度器 ----------
 
@@ -205,12 +302,33 @@ def scheduler_loop():
 
 _TRAY: TrayApp | None = None
 
-def build_tray() -> TrayApp:
-    def quit_app():
-        _scheduler_stop.set()
-        if _TRAY:
-            _TRAY.stop()
+def _hard_exit_watchdog(seconds: float = 4.0):
+    """兜底：若正常退出流程卡住，强制结束进程，杜绝残留 pythonw/pyw。"""
+    def _watch():
+        time.sleep(seconds)
+        _dbg(f"[quit] {seconds}s 内未正常退出，强制 os._exit(0)")
+        os._exit(0)
+    threading.Thread(target=_watch, daemon=True).start()
 
+
+def quit_app():
+    """彻底退出：停调度 → 停语音 → 关弹窗 → 停托盘 → 兜底强杀。"""
+    _dbg("[quit] 开始退出")
+    _hard_exit_watchdog(4.0)
+    _scheduler_stop.set()
+    _tts_stop.set()          # 立刻停止后台语音
+    try:
+        _close_popup()       # 关闭可能还开着的全屏弹窗
+    except Exception:
+        pass
+    if _TRAY:
+        try:
+            _TRAY.stop()
+        except Exception:
+            _dbg("[quit] tray.stop 异常:\n" + traceback.format_exc())
+
+
+def build_tray() -> TrayApp:
     menu_items = [
         (1, "立即试播：每日 1 分钟提醒", lambda: do_broadcast("daily")),
         (2, "立即试播：周五 5 分钟专题", lambda: do_broadcast("friday")),
@@ -235,6 +353,17 @@ def main():
         _dbg("托盘 run() 返回，程序退出")
     except Exception:
         fatal(traceback.format_exc())
+    finally:
+        # 确保语音停止、弹窗关闭，并且进程一定结束（不残留 pythonw/pyw）
+        _tts_stop.set()
+        try:
+            _close_popup()
+        except Exception:
+            pass
+        # 给正在收尾的播报线程一点时间把日志写完
+        _broadcast_lock.acquire(timeout=2.0)
+        _dbg("进程结束，os._exit(0)")
+        os._exit(0)
 
 if __name__ == "__main__":
     _dbg("进程启动，python=" + sys.executable)

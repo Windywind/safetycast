@@ -11,6 +11,8 @@ menu_items: [(id:int, text:str, callback), ...]；id=0 表示分隔线。
 
 import ctypes
 import ctypes.wintypes as wt
+import threading
+import traceback
 from ctypes import wintypes
 
 # 用独立 DLL 实例（而非共享的 ctypes.windll.user32），
@@ -115,19 +117,35 @@ class TrayApp:
 
     # ---- Win32 窗口与托盘 ----
 
+    def _fire(self, cb):
+        """在后台线程执行回调。
+
+        绝不能在 wndproc 里同步执行耗时回调：那会阻塞托盘消息循环，
+        导致托盘图标假死、鼠标显示忙碌（转圈）光标、WM_CLOSE 也处理不了
+        （表现为退出后 pythonw 进程残留）。
+        """
+        if cb is None:
+            return
+
+        def _run():
+            try:
+                cb()
+            except Exception:
+                traceback.print_exc()
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
         if msg == WM_TRAY:
             if lparam in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
-                if self.on_click:
-                    self.on_click()
+                # 左键单击即触发；双击会连发多条消息，由调用方自行去重
+                self._fire(self.on_click)
                 return 0
             if lparam == WM_RBUTTONUP:
                 self._show_menu()
                 return 0
         elif msg == WM_COMMAND:
-            cb = self._handlers.get(wparam & 0xFFFF)
-            if cb:
-                cb()
+            self._fire(self._handlers.get(wparam & 0xFFFF))
             return 0
         elif msg == WM_CLOSE:
             user32.DestroyWindow(hwnd)

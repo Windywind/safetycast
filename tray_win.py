@@ -138,7 +138,8 @@ class TrayApp:
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
         if msg == WM_TRAY:
             if lparam in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
-                # 左键单击即触发；双击会连发多条消息，由调用方自行去重
+                # 左键回调可选（on_click=None 时无任何动作）；
+                # 双击会连发多条消息，绑定回调时由调用方自行去重
                 self._fire(self.on_click)
                 return 0
             if lparam == WM_RBUTTONUP:

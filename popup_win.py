@@ -3,6 +3,8 @@
 纯 ctypes Win32 全屏弹窗（替代 tkinter）。
 红底大字 + 置顶 + ESC/点击关闭 + 定时自动关闭。
 DPI 感知：字号/边距按物理像素动态计算，适配 100%~200% 缩放。
+字号可由设置界面的「字号」档位缩放（show_popup 的 font_scale 参数）；该系数只抬高
+理想字号，不抬高长文本的收缩下限，故不会重新引入 1080P@150% 的溢出裁切问题。
 不依赖 tkinter，兼容无 GUI 模块的 Python 构建。
 """
 
@@ -181,11 +183,16 @@ _popup_hwnd = None       # 当前弹窗句柄，供外部线程关闭
 _popup_opened_at = 0.0   # 弹窗打开时间戳
 _btn_hover = False       # 鼠标是否悬停在关闭按钮上
 
-def _calc_layout(rect, body_len):
+def _calc_layout(rect, body_len, font_scale=1.0):
     """按屏幕物理像素计算字号、边距、关闭按钮位置。
 
     字号使用「em 高度」（CreateFont 传负值），比字符格高度更大更可控。
     正文很长时压缩标题高度，把空间让给正文。
+
+    font_scale 是设置界面「字号」档位换算出的缩放系数，乘在按屏幕比例算出的基准
+    字号上 —— 既让老师能调大小，又完整保留 DPI 自适应。注意它只抬高「理想字号」，
+    **不抬高 _fit_font 的收缩下限**（下限由调用方按未缩放基准换算 min_ratio），
+    否则长文本在大字号档会因下限过高而溢出裁切，P0 修过的 bug 会复发。
     """
     global _close_btn_rect
     w = rect.right - rect.left
@@ -207,7 +214,7 @@ def _calc_layout(rect, body_len):
 
     # 标题：短正文给大标题，长正文压缩标题
     long_body = body_len > 120
-    title_em = max(52, int(h * (0.075 if long_body else 0.115)))
+    title_em = max(52, int(h * (0.075 if long_body else 0.115) * font_scale))
     title_h = int(title_em * 1.5)
     r_title = RECT(
         rect.left + margin_x,
@@ -224,8 +231,8 @@ def _calc_layout(rect, body_len):
         rect.bottom - margin_bottom,
     )
 
-    # 正文基准字号：屏幕高度的 8.5%（1080p ≈ 92px em）
-    body_em = max(34, int(h * 0.085))
+    # 正文基准字号：屏幕高度的 8.5%（1080p ≈ 92px em），再乘字号档位系数
+    body_em = max(34, int(h * 0.085 * font_scale))
 
     return r_title, r_body, title_em, body_em, btn_size
 
@@ -317,9 +324,12 @@ def _popup_wndproc(hwnd, msg, wparam, lparam):
         # 计算布局
         title = _popup_state.get("title", "")
         body = _popup_state.get("body", "")
-        r_title, r_body, title_em, body_em, btn_size = _calc_layout(rect, len(body))
+        scale = _popup_state.get("font_scale", 1.0)
+        r_title, r_body, title_em, body_em, btn_size = _calc_layout(
+            rect, len(body), scale)
 
-        # 关闭按钮（右上角红底白 ×）
+        # 关闭按钮（右上角红底白 ×）—— 尺寸只跟屏幕走，不随字号档位变，
+        # 保证它始终是可稳定命中的触控目标
         if _close_btn_rect:
             btn_color = RGB_CLOSE_HOVER if _btn_hover else RGB_CLOSE_BG
             hbr_btn = gdi32.CreateSolidBrush(btn_color)
@@ -328,15 +338,19 @@ def _popup_wndproc(hwnd, msg, wparam, lparam):
             _draw_centered(hdc, "×", _close_btn_rect,
                            max(30, int(btn_size * 0.62)), RGB_WHITE)
 
+        # 字号档位只放大「理想字号」，收缩下限仍按未缩放基准算：把 min_ratio 除以
+        # scale 后，下限 = int(base_em × scale × ratio ÷ scale) = 未缩放时的下限，
+        # 因此长文本（节假日专题约 350 字）在 150% 档也不会被裁切。
         # 标题（黄色大字，同样自适应）
         if title:
             t_em, t_h = _fit_font(hdc, title, r_title, title_em,
-                                  min_ratio=0.5, max_ratio=1.0)
+                                  min_ratio=0.5 / scale, max_ratio=1.0)
             _draw_centered(hdc, title, r_title, t_em, RGB_YELLOW, t_h)
 
         # 正文（白色大字：长文本自动缩字号 + 真正垂直居中）
         if body:
-            fitted_em, text_h = _fit_font(hdc, body, r_body, body_em)
+            fitted_em, text_h = _fit_font(hdc, body, r_body, body_em,
+                                          min_ratio=0.34 / scale)
             _draw_centered(hdc, body, r_body, fitted_em, RGB_WHITE, text_h)
 
         user32.EndPaint(hwnd, ctypes.byref(ps))
@@ -427,13 +441,16 @@ def _ensure_class():
     _popup_registered = True
 
 def show_popup(title: str, text: str, hold_seconds: int = 12,
-               should_close=None, max_hold_seconds: int = 900):
+               should_close=None, max_hold_seconds: int = 900,
+               font_scale: float = 1.0):
     """显示全屏红底弹窗，阻塞直到关闭。DPI 感知，字号按物理像素动态计算。
 
     参数：
         hold_seconds     最短停留秒数
         should_close     可选回调，返回 True 才允许到点自动关闭（用于等 TTS 念完）
         max_hold_seconds 兜底最长停留秒数，防止永不关闭
+        font_scale       字号缩放系数（设置界面「字号」档位 ÷ 100），1.0 为基准。
+                         非法值一律夹到 0.5~3.0，绝不因配置写坏而不弹窗。
 
     关闭方式：右上角红底白 ×、ESC 键、到点自动关闭、或外部调用 close_popup()。
     点击窗口其它区域不会关闭（避免上课误触）。
@@ -441,11 +458,20 @@ def show_popup(title: str, text: str, hold_seconds: int = 12,
     global _screen_w, _screen_h, _close_btn_rect
     global _popup_hwnd, _btn_hover, _popup_opened_at
 
+    try:
+        scale = float(font_scale)
+    except (TypeError, ValueError):
+        scale = 1.0
+    if not scale == scale or scale <= 0:      # NaN 与非正数
+        scale = 1.0
+    scale = min(3.0, max(0.5, scale))
+
     _popup_state["title"] = title
     _popup_state["body"] = text
     _popup_state["hold"] = hold_seconds
     _popup_state["max_hold"] = max_hold_seconds
     _popup_state["should_close"] = should_close
+    _popup_state["font_scale"] = scale
     _close_btn_rect = None
     _btn_hover = False
     _ensure_class()

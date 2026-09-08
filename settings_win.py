@@ -24,7 +24,8 @@
 
 4. **依赖注入断环**：本模块不 import broadcast（否则与 broadcast 的延迟导入构成
    概念上的环，且会把 comtypes/SAPI / popup_win / tray_win 拖进测试依赖）。保存、
-   试听、音色枚举全部由调用方注入回调，本模块只依赖 config_store。
+   试听、音色枚举全部由调用方注入回调，本模块只依赖 config_store / autostart
+   （两者均为纯 stdlib 逻辑模块，可进单元测试）。
 
 5. **绝不在 wndproc 里同步做耗时操作**：落盘、试听朗读均派发后台线程，理由同
    tray_win._fire 的注释（否则窗口假死、鼠标转圈、WM_CLOSE 处理不了导致进程残留）。
@@ -44,6 +45,7 @@ import re
 import threading
 import traceback
 
+import autostart
 import config_store
 
 # 用独立 DLL 实例（而非共享的 ctypes.windll.user32），避免与 popup_win.py /
@@ -117,6 +119,7 @@ ID_FONT = 23
 ID_RATE = 24
 ID_VOLUME = 25
 ID_VOICE = 26
+ID_AUTOSTART = 27
 ID_RULE_BASE = 100      # 每条规则占 3 个：enabled / lead / title
 
 # 滚动条
@@ -583,6 +586,7 @@ class SettingsWindow:
             + max(ROW_H, hh["hold_hint"]) + GROUP_PAD_BOTTOM,
             GROUP_TITLE_H + ROW_H * 2 + max(BTN_H, hh["preview_hint"])
             + GROUP_PAD_BOTTOM,
+            GROUP_TITLE_H + ROW_H + GROUP_PAD_BOTTOM,   # 组 6：启动
         )
         gaps = GROUP_GAP * (len(groups) - 1)
         return PAD + sum(groups) + gaps + PAD
@@ -805,6 +809,17 @@ class SettingsWindow:
             "Button", "停止试听", BS_PUSHBUTTON, INNER_X + 96, row3, 90, BTN_H,
             ID_PREVIEW_STOP)
         self._hint("preview_hint", INNER_X + 196, row3)
+        y = y_next
+
+        # 组 6：启动（状态以注册表为唯一事实来源，开窗时现读；不进 config.json）
+        y, y_next = self._group(y, "启动", ROW_H)
+        self.ctl["autostart"] = self._check(
+            "开机自动启动（登录 Windows 后自动运行本程序）",
+            INNER_X, y, INNER_W, ID_AUTOSTART)
+        try:
+            self._set_check(self.ctl["autostart"], autostart.is_enabled())
+        except Exception:
+            _dbg("[settings] 读取开机自启状态失败:\n" + traceback.format_exc())
         y = y_next
 
         # 内容总高 = 最后一组的 next_y 已含 GROUP_GAP，去掉尾部多余间距再补 PAD
@@ -1164,11 +1179,13 @@ class SettingsWindow:
             self._show_errors(errors)
             return                        # 不落盘、不关窗，保留用户已填内容供修正
         _dbg("[settings] 校验通过，派发后台线程落盘")
+        # 开机自启不走 config_store（注册表是唯一事实来源），单独随保存动作落注册表
+        autostart_on = self._get_check(self.ctl["autostart"])
         # 落盘是磁盘 I/O，绝不在 wndproc 里同步做（否则窗口假死、鼠标转圈）
-        threading.Thread(target=self._apply_async, args=(clean,),
+        threading.Thread(target=self._apply_async, args=(clean, autostart_on),
                          daemon=True).start()
 
-    def _apply_async(self, clean: dict):
+    def _apply_async(self, clean: dict, autostart_on: bool):
         try:
             self._on_apply(clean)
         except Exception:
@@ -1176,6 +1193,15 @@ class SettingsWindow:
             tail = traceback.format_exc().strip().splitlines()[-1]
             self._msg(f"保存失败，配置未生效，原设置保持不变。\n\n{tail}", error=True)
             return
+        try:
+            autostart.set_enabled(autostart_on)
+            _dbg(f"[settings] 开机自启已{'启用' if autostart_on else '禁用'}")
+        except Exception:
+            # 配置已生效，仅自启项写失败：如实告知（话术不与上面的整体失败混淆）
+            _dbg("[settings] 开机自启写注册表失败:\n" + traceback.format_exc())
+            tail = traceback.format_exc().strip().splitlines()[-1]
+            self._msg(f"配置已保存并生效，但开机自启设置失败：\n\n{tail}",
+                      error=True)
         _dbg("[settings] 保存成功并已热生效，关闭窗口")
         # 回 UI 线程关窗（不能在后台线程直接 DestroyWindow）
         if self.hwnd_main:

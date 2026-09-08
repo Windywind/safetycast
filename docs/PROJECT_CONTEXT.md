@@ -107,9 +107,10 @@
 
 ## 8. 后续开发注意事项 / 已知限制（MVP）
 
-- 无远程推送、无开机自启注册、无服务端地址配置（V1.0 内网服务端尚未开发，设置界面暂不放该字段以免困惑）。
+- 无远程推送、无服务端地址配置（V1.0 内网服务端尚未开发，设置界面暂不放该字段以免困惑）。
+- 开机自启（P2）已交付：`autostart.py` 写 HKCU Run 键（免提权，注册表为唯一事实来源，不进 config.json）；设置界面「启动」分组勾选即写/删。单实例互斥在 `broadcast.main()` 入口用 CreateMutexW（`Local\SafetyCastSingleInstance`），重复启动弹提示后退出。按用户决策：不做任务计划兜底、不做崩溃自恢复。
 - 设置界面（P1）已交付：托盘右键「设置…」→ 单页分组窗口，保存即热生效、无需重启。热生效链路三处：① `config_store.apply()` 对 CONFIG 原地 `clear()+update()`；② `broadcast._config_dirty` 脏标记，`scheduler_loop` 在 15s 轮询内检测到则置 `next_broadcast=None` 强制重算；③ `popup_win.show_popup(font_scale=...)` 下次播报采用新字号。
 - PRD 规划的 V1.0（内网服务端版）尚未开始：内网 REST 服务端（FastAPI+SQLite）、教师端 Web 页面、台账同步等。小程序本阶段不考虑。
-- MVP 待办优先级：P0 DPI自适应+弹窗改进（已完成）→ P1 设置界面+配置扩展（已完成）→ P2 开机自启+Excel导出 → P3 exe打包。
+- MVP 待办优先级：P0 DPI自适应+弹窗改进（已完成）→ P1 设置界面+配置扩展（已完成）→ P2 开机自启（已完成）+Excel导出 → P3 exe打包。
 - 若需打包 exe：注意 pystray/tkinter 的坑已在代码层绕开，可直接用 PyInstaller 尝试。
 - 修改弹窗/托盘代码时，保持"结构体在前、argtypes 在后"的书写顺序。

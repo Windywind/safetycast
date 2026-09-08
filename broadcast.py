@@ -9,6 +9,7 @@
 
 import contextlib
 import csv
+import ctypes
 import datetime
 import math
 import os
@@ -590,9 +591,45 @@ def build_tray() -> TrayApp:
 
 # ---------- 入口 ----------
 
+# 单实例互斥句柄：必须活到进程结束，故放模块级全局（GC 提前释放会让第二个
+# 实例误判可以启动）。进程退出时由系统回收，无需主动 CloseHandle。
+_single_instance_mutex = None
+
+
+def _acquire_single_instance() -> bool:
+    """单实例互斥：已有一个实例在跑则返回 False。
+
+    CreateMutexW 创建的是内核对象，跨进程可见（pythonw 双击、注册表自启
+    都走不同进程）。用 Local\\ 会话级命名空间：教室机器单账号场景够用，
+    Global\\ 需要额外权限且会跨远程桌面会话误拦。
+    创建失败（极端情况）选择放行 —— 宁可双开也不挡住安全播报。
+    """
+    global _single_instance_mutex
+    ERROR_ALREADY_EXISTS = 183
+    handle = ctypes.windll.kernel32.CreateMutexW(
+        None, False, r"Local\SafetyCastSingleInstance")
+    if not handle:
+        _dbg("[main] CreateMutexW 失败，放行启动")
+        return True
+    if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return False
+    _single_instance_mutex = handle
+    return True
+
+
 def main():
     global _TRAY
     _dbg("main() 开始")
+    if not _acquire_single_instance():
+        _dbg("[main] 已有实例在运行，本进程退出")
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                0, "课堂安全播报助手已在运行中（见任务栏右下角托盘图标）。",
+                "课堂安全播报助手", 0x40)  # MB_ICONINFORMATION
+        except Exception:
+            pass
+        os._exit(0)
     try:
         threading.Thread(target=scheduler_loop, daemon=True).start()
         _dbg("scheduler_loop 已启动，放学时间=" + CONFIG["dismissal_time"])

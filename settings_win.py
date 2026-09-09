@@ -42,6 +42,7 @@ import datetime
 import math
 import os
 import re
+import sys
 import threading
 import traceback
 
@@ -55,7 +56,9 @@ user32 = ctypes.WinDLL("user32")
 gdi32 = ctypes.WinDLL("gdi32")
 kernel32 = ctypes.WinDLL("kernel32")
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 冻结态下锚定 exe 所在目录（理由同 broadcast.py 的 BASE_DIR 注释）
+BASE_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.abspath(__file__)))
 DEBUG_LOG = os.path.join(BASE_DIR, "log", "debug.log")
 ICO_PATH = os.path.join(BASE_DIR, "app.ico")
 
@@ -1091,6 +1094,12 @@ class SettingsWindow:
         try:
             if msg == WM_COMMAND:
                 self._on_command(wparam & 0xFFFF)
+                return 0
+            if msg == WM_APP_PREVIEW_DONE and hwnd == self.hwnd_main:
+                # 试听线程（念完或被停止）收尾后回 UI 线程恢复按钮状态。
+                # 历史 bug：曾漏掉此分支，消息落入 DefWindowProcW 被丢弃，
+                # 按钮永久停在 running 态（试听禁用），无法再次试听。
+                self._set_preview_buttons(running=False)
                 return 0
             if msg == WM_VSCROLL and hwnd == self.hwnd_view:
                 self._on_vscroll(wparam & 0xFFFF, wparam)

@@ -22,10 +22,20 @@ import traceback
 
 import config_store
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# PyInstaller 冻结态下 __file__ 指向临时解压目录（_MEIPASS），可写数据
+# （config.json、log/）必须锚定 exe 所在目录，否则每次启动写到不同的临时目录。
+BASE_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 LOG_PATH = os.path.join(BASE_DIR, "log", "broadcast_log.csv")
 DEBUG_LOG = os.path.join(BASE_DIR, "log", "debug.log")
+
+# 绿色解压的 dist 目录里没有 log/，启动时先建好（目录不可写时各写日志点
+# 自行容错，不挡启动）
+try:
+    os.makedirs(os.path.join(BASE_DIR, "log"), exist_ok=True)
+except Exception:
+    pass
 
 def _dbg(msg: str):
     try:

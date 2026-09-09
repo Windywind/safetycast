@@ -8,3 +8,8 @@ __pycache__/
 # Logs
 log/debug.log
 log/broadcast_log.csv
+
+# PyInstaller
+build/
+dist/
+*.spec

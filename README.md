@@ -101,6 +101,14 @@ Windows 桌面驻留的 1530 安全教育自动播报工具（单机离线版）
 
 ## 交付部署
 
+**方式 A：exe 绿色包（推荐，目标机无需 Python）**
+
+1. 在本机双击 `script/build_exe.bat`（首次会自动安装 PyInstaller）。
+2. 将生成的 `dist/SafetyCast/` 整个文件夹拷贝到目标机器。
+3. 双击 `SafetyCast.exe` 启动；`config.json`/`log/` 都在 exe 旁，开机自启在设置里勾选即可。
+
+**方式 B：源码运行**
+
 1. 将整个项目文件夹拷贝到目标机器。
 2. 确认目标机器已安装 Python（3.8+），并加入了系统 PATH。
 3. 双击 `script/setup.bat` 安装依赖。

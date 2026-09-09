@@ -104,8 +104,11 @@ Windows 桌面驻留的 1530 安全教育自动播报工具（单机离线版）
 **方式 A：exe 绿色包（推荐，目标机无需 Python）**
 
 1. 在本机双击 `script/build_exe.bat`（首次会自动安装 PyInstaller）。
-2. 将生成的 `dist/SafetyCast/` 整个文件夹拷贝到目标机器。
-3. 双击 `SafetyCast.exe` 启动；`config.json`/`log/` 都在 exe 旁，开机自启在设置里勾选即可。
+2. 把生成的 `dist/SafetyCast.exe`（**单个文件**，约 7MB）拷到目标机器任意位置。
+3. 双击运行；`config.json`/`log/` 自动生成在 exe 旁，开机自启在设置里勾选即可。
+   想换托盘图标，把自定义 `app.ico` 放到 exe 旁即可（不放则用内嵌默认图标）。
+
+> 单文件模式启动比文件夹模式慢 1~3 秒（每次自解压到临时目录），属正常。
 
 **方式 B：源码运行**
 

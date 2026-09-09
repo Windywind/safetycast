@@ -1,8 +1,9 @@
 @echo off
 cd /d "%~dp0\.."
 
-REM Build SafetyCast.exe with PyInstaller (onedir, windowed).
-REM Output: dist\SafetyCast\  (portable folder, config.json + app.ico copied in)
+REM Build SafetyCast.exe with PyInstaller (onefile, windowed).
+REM Output: dist\SafetyCast.exe  (single portable file, no Python needed)
+REM Note: startup is 1-3s slower than onedir (self-extract to temp each run).
 
 set "PY="
 if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
@@ -24,18 +25,14 @@ if errorlevel 1 (
     )
 )
 
-"%PY%" -m PyInstaller --noconfirm --clean --windowed --name SafetyCast --icon app.ico broadcast.py
+"%PY%" -m PyInstaller --noconfirm --clean --windowed --onefile --name SafetyCast --icon app.ico --add-data "app.ico;." broadcast.py
 if errorlevel 1 (
     echo [FAIL] PyInstaller build failed
     pause
     exit /b 1
 )
 
-REM config.json / log/ resolve next to the exe when frozen (see BASE_DIR in
-REM broadcast.py), so ship the icon and current config beside it.
-copy /y app.ico "dist\SafetyCast\" >nul
-if exist config.json copy /y config.json "dist\SafetyCast\" >nul
-
-echo [OK] dist\SafetyCast\SafetyCast.exe ready
-echo      Double-click to run; enable autostart in Settings if needed.
+echo [OK] dist\SafetyCast.exe ready (single file)
+echo      Copy it anywhere; config.json and log\ appear beside it on first run.
+echo      Optional: put a custom app.ico beside it to replace the tray icon.
 pause

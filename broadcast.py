@@ -37,6 +37,15 @@ try:
 except Exception:
     pass
 
+# 托盘/设置窗图标：exe 旁的 app.ico 优先（老师可自行替换定制），没有则用
+# onefile 打包内嵌的副本（--add-data 解到 sys._MEIPASS，每次运行路径都不同）
+if getattr(sys, "frozen", False):
+    _ico_beside = os.path.join(BASE_DIR, "app.ico")
+    ICO_PATH = (_ico_beside if os.path.exists(_ico_beside)
+                else os.path.join(getattr(sys, "_MEIPASS", BASE_DIR), "app.ico"))
+else:
+    ICO_PATH = os.path.join(BASE_DIR, "app.ico")
+
 def _dbg(msg: str):
     try:
         with open(DEBUG_LOG, "a", encoding="utf-8") as f:
@@ -66,8 +75,6 @@ try:
 except Exception as e:
     fatal(f"托盘模块加载失败：{e}\n{traceback.format_exc()}")
     raise SystemExit(1)
-
-ICO_PATH = os.path.join(BASE_DIR, "app.ico")
 
 try:
     import content as content_lib

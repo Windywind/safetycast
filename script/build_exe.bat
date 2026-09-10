@@ -33,6 +33,7 @@ if errorlevel 1 (
 )
 
 echo [OK] dist\SafetyCast.exe ready (single file)
-echo      Copy it anywhere; config.json and log\ appear beside it on first run.
+echo      Copy it anywhere; data lives in %%APPDATA%%\SafetyCast\
+echo      (old data beside the exe is migrated on first run).
 echo      Optional: put a custom app.ico beside it to replace the tray icon.
 pause

@@ -56,10 +56,10 @@ user32 = ctypes.WinDLL("user32")
 gdi32 = ctypes.WinDLL("gdi32")
 kernel32 = ctypes.WinDLL("kernel32")
 
-# 冻结态下锚定 exe 所在目录（理由同 broadcast.py 的 BASE_DIR 注释）
+# 冻结态下 exe 所在目录只用于解析只读资源（app.ico），理由同 broadcast.py
 BASE_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
             else os.path.dirname(os.path.abspath(__file__)))
-DEBUG_LOG = os.path.join(BASE_DIR, "log", "debug.log")
+DEBUG_LOG = os.path.join(config_store.DATA_DIR, "log", "debug.log")
 # 图标解析与 broadcast.py 同策略：exe 旁优先，否则 onefile 包内 _MEIPASS 副本
 if getattr(sys, "frozen", False):
     _ico_beside = os.path.join(BASE_DIR, "app.ico")

@@ -19,6 +19,66 @@ import json
 import os
 import re
 import shutil
+import sys
+
+
+# ------------------------------------------------------------------ 数据目录
+
+def compute_data_dir(frozen: bool, exe_dir: str, appdata: str) -> str:
+    """可写数据目录：冻结态（exe）→ %APPDATA%\\SafetyCast（受保护目录也照常
+    可写）；开发态（.py 运行）→ 本模块所在目录（config.json 随仓库走，测试
+    不受影响）。开发态忽略 exe_dir —— .py 运行时解释器路径与数据位置无关。"""
+    if frozen:
+        return os.path.join(appdata, "SafetyCast")
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def migrate_legacy_data(data_dir: str, legacy_dir: str) -> list:
+    """一次性迁移旧版「exe 旁」数据（config.json / log/）到新数据目录。
+
+    只拷贝不删除旧文件（迁移失败可回退，老师数据零风险）；
+    目标已存在同内容则跳过，绝不覆盖 —— 重装/换机器后先跑新版本再放回旧目录
+    也不会把新数据冲掉。返回实际迁移的条目名列表（如 ["config.json", "log"]）。
+    """
+    moved = []
+    src_cfg = os.path.join(legacy_dir, "config.json")
+    dst_cfg = os.path.join(data_dir, "config.json")
+    if os.path.isfile(src_cfg) and not os.path.exists(dst_cfg):
+        try:
+            shutil.copy2(src_cfg, dst_cfg)
+            moved.append("config.json")
+        except OSError:
+            pass
+    src_log = os.path.join(legacy_dir, "log")
+    dst_log = os.path.join(data_dir, "log")
+    if os.path.isdir(src_log) and not os.path.exists(dst_log):
+        try:
+            shutil.copytree(src_log, dst_log)
+            moved.append("log")
+        except OSError:
+            pass
+    return moved
+
+
+# 模块导入时即解析（broadcast / settings_win 直接引用 DATA_DIR）
+_IS_FROZEN = bool(getattr(sys, "frozen", False))
+_EXE_DIR = (os.path.dirname(sys.executable) if _IS_FROZEN
+            else os.path.dirname(os.path.abspath(__file__)))
+_APPDATA = (os.environ.get("APPDATA")
+            or os.environ.get("LOCALAPPDATA")
+            or os.path.expanduser("~"))
+DATA_DIR = compute_data_dir(_IS_FROZEN, _EXE_DIR, _APPDATA)
+
+# 数据目录就绪：**先迁移再建目录**（makedirs 先跑会让 log/ 已存在，
+# migrate_legacy_data 误判「目标已有」而跳过 log 迁移——冒烟实测踩过）
+# 冻结态首次运行：把旧版 exe 旁的数据搬过来（结果供 broadcast 记日志）
+MIGRATED: list = []
+if _IS_FROZEN:
+    MIGRATED = migrate_legacy_data(DATA_DIR, _EXE_DIR)
+try:
+    os.makedirs(os.path.join(DATA_DIR, "log"), exist_ok=True)
+except OSError:
+    pass
 
 # ------------------------------------------------------------------ schema
 

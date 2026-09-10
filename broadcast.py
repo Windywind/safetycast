@@ -22,20 +22,14 @@ import traceback
 
 import config_store
 
-# PyInstaller 冻结态下 __file__ 指向临时解压目录（_MEIPASS），可写数据
-# （config.json、log/）必须锚定 exe 所在目录，否则每次启动写到不同的临时目录。
+# PyInstaller 冻结态下 __file__ 指向临时解压目录（_MEIPASS）；可写数据
+# （config.json、log/）统一放 config_store.DATA_DIR（冻结态 = %APPDATA%\
+# SafetyCast，开发态 = 项目目录，含旧版 exe-旁数据的一次性迁移）。
 BASE_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
             else os.path.dirname(os.path.abspath(__file__)))
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
-LOG_PATH = os.path.join(BASE_DIR, "log", "broadcast_log.csv")
-DEBUG_LOG = os.path.join(BASE_DIR, "log", "debug.log")
-
-# 绿色解压的 dist 目录里没有 log/，启动时先建好（目录不可写时各写日志点
-# 自行容错，不挡启动）
-try:
-    os.makedirs(os.path.join(BASE_DIR, "log"), exist_ok=True)
-except Exception:
-    pass
+CONFIG_PATH = os.path.join(config_store.DATA_DIR, "config.json")
+LOG_PATH = os.path.join(config_store.DATA_DIR, "log", "broadcast_log.csv")
+DEBUG_LOG = os.path.join(config_store.DATA_DIR, "log", "debug.log")
 
 # 托盘/设置窗图标：exe 旁的 app.ico 优先（老师可自行替换定制），没有则用
 # onefile 打包内嵌的副本（--add-data 解到 sys._MEIPASS，每次运行路径都不同）
@@ -638,6 +632,9 @@ def _acquire_single_instance() -> bool:
 def main():
     global _TRAY
     _dbg("main() 开始")
+    if config_store.MIGRATED:
+        _dbg("[migrate] 旧版 exe 旁数据已迁移到 "
+             f"{config_store.DATA_DIR}：" + ", ".join(config_store.MIGRATED))
     if not _acquire_single_instance():
         _dbg("[main] 已有实例在运行，本进程退出")
         try:

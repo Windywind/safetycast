@@ -3,10 +3,10 @@
 
 覆盖点：
 1. merge_defaults 深合并：补齐缺失键、不覆盖已有值、不修改入参、保留未知键
-2. 向后兼容：现网旧 config.json（无 popup_font_scale / tts_voice）能安全升级
+2. 向后兼容：现网旧 config.json（无 popup_font_scale / tts_voice / tts_output_device）能安全升级
 3. validate 接受合法输入：含各字段边界值、多行文本形式的假期列表
 4. validate 拒绝非法输入：错时间格式、越界分钟/秒数、坏日期、空标题，且错误信息指明字段
-5. validate 归一化：字符串数字转 int、档位吸附、tts_voice 结构归一
+5. validate 归一化：字符串数字转 int、档位吸附、tts_voice / tts_output_device 结构归一
 6. save_atomic：往返一致、UTF-8 中文、.bak 备份、不留 .tmp、失败时原文件完好
 7. load：损坏 json 与文件缺失均容错回退默认值，并通过回调上报原因
 8. apply：原地变更 CONFIG，保持 dict 身份不变（热生效的基石）
@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config_store
 
 
-# 现网 config.json 的原始内容 —— 刻意不含本次新增的两个键，用于验证向后兼容
+# 现网 config.json 的原始内容 —— 刻意不含本次新增的键，用于验证向后兼容
 OLD_CONFIG = {
     "dismissal_time": "16:30",
     "tts_rate": 175,
@@ -38,6 +38,7 @@ OLD_CONFIG = {
 }
 
 DEFAULT_VOICE = {"id": "", "name": "系统默认"}
+DEFAULT_OUTPUT = {"id": "", "name": "系统默认"}
 
 
 def valid_raw(**over):
@@ -45,6 +46,7 @@ def valid_raw(**over):
     raw = copy.deepcopy(OLD_CONFIG)
     raw["popup_font_scale"] = 100
     raw["tts_voice"] = copy.deepcopy(DEFAULT_VOICE)
+    raw["tts_output_device"] = copy.deepcopy(DEFAULT_OUTPUT)
     raw.update(over)
     return raw
 
@@ -123,12 +125,14 @@ class TestMergeDefaults(ConfigStoreTestCase):
 
 class TestBackwardCompat(ConfigStoreTestCase):
 
-    def test_old_config_gains_the_two_new_keys(self):
+    def test_old_config_gains_the_new_keys(self):
         merged = config_store.merge_defaults(copy.deepcopy(OLD_CONFIG))
         self.assertIn("popup_font_scale", merged)
         self.assertIn("tts_voice", merged)
+        self.assertIn("tts_output_device", merged)
         self.assertEqual(merged["popup_font_scale"], 100)
         self.assertEqual(merged["tts_voice"], DEFAULT_VOICE)
+        self.assertEqual(merged["tts_output_device"], DEFAULT_OUTPUT)
 
     def test_old_config_existing_values_untouched(self):
         merged = config_store.merge_defaults(copy.deepcopy(OLD_CONFIG))
@@ -203,6 +207,13 @@ class TestValidateAccepts(ConfigStoreTestCase):
         clean, errors = config_store.validate(valid_raw(tts_voice=voice))
         self.assertEqual(errors, [])
         self.assertEqual(clean["tts_voice"], voice)
+
+    def test_real_output_device_accepted(self):
+        device = {"id": r"{0.0.0.00000000}.{some-endpoint-guid}",
+                  "name": "Steam Streaming Speakers"}
+        clean, errors = config_store.validate(valid_raw(tts_output_device=device))
+        self.assertEqual(errors, [])
+        self.assertEqual(clean["tts_output_device"], device)
 
     def test_title_at_max_length_accepted(self):
         clean, errors = config_store.validate(valid_raw())
@@ -361,6 +372,25 @@ class TestValidateNormalization(ConfigStoreTestCase):
             clean, errors = config_store.validate(valid_raw(tts_voice=empty))
             self.assertEqual(errors, [], f"tts_voice={empty!r} 应回退默认而非报错")
             self.assertEqual(clean["tts_voice"], DEFAULT_VOICE)
+
+    def test_wrong_typed_output_device_falls_back_to_system_default(self):
+        for bad in ("SOME_DEVICE_ID", 42, ["列表"]):
+            clean, errors = config_store.validate(valid_raw(tts_output_device=bad))
+            self.assertEqual(errors, [], f"tts_output_device={bad!r} 应静默回退而非报错")
+            self.assertEqual(clean["tts_output_device"], DEFAULT_OUTPUT)
+
+    def test_missing_output_device_name_filled(self):
+        clean, errors = config_store.validate(valid_raw(tts_output_device={"id": "X"}))
+        self.assertEqual(errors, [])
+        self.assertEqual(clean["tts_output_device"]["id"], "X")
+        self.assertTrue(clean["tts_output_device"]["name"])
+
+    def test_empty_output_device_normalized_to_system_default(self):
+        for empty in (None, "", {}):
+            clean, errors = config_store.validate(valid_raw(tts_output_device=empty))
+            self.assertEqual(errors, [],
+                             f"tts_output_device={empty!r} 应回退默认而非报错")
+            self.assertEqual(clean["tts_output_device"], DEFAULT_OUTPUT)
 
     def test_clean_output_is_json_serializable(self):
         clean, errors = config_store.validate(valid_raw())

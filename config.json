@@ -6,6 +6,10 @@
     "id": "",
     "name": "系统默认"
   },
+  "tts_output_device": {
+    "id": "",
+    "name": "系统默认"
+  },
   "popup_min_hold_seconds": 12,
   "popup_font_scale": 100,
   "rules": {

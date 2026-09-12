@@ -97,7 +97,6 @@
 - **操作授权规则（重要）**：未经针对具体操作的明确授权，只做只读操作。改配置/装软件/删移文件/启停服务等必须先问再做。已因此被纠正两次，不得有第三次。
 - **沟通偏好**：不要客套话（"好的！""很高兴帮你"），直接说事；对风险/破坏性操作先警告+列清单+等确认。
 - **文档交付偏好**：默认给 Markdown，**不要主动上 docx 流水线**（曾因擅自走 tdoc-orchestrator 被叫停）。
-- 用户背景：游戏串流/显示设备调试（Dell S2716DG + HDMI 诱骗器 + Sunshine/Moonlight），非本项目的上下文。
 
 ## 7. 当前状态与验证结果
 
@@ -111,5 +110,5 @@
 - 开机自启（P2）已交付：`autostart.py` 写 HKCU Run 键（免提权，注册表为唯一事实来源，不进 config.json）；设置界面「启动」分组勾选即写/删。单实例互斥在 `broadcast.main()` 入口用 CreateMutexW（`Local\SafetyCastSingleInstance`），重复启动弹提示后退出。按用户决策：不做任务计划兜底、不做崩溃自恢复。
 - 设置界面（P1）已交付：托盘右键「设置…」→ 单页分组窗口，保存即热生效、无需重启。热生效链路三处：① `config_store.apply()` 对 CONFIG 原地 `clear()+update()`；② `broadcast._config_dirty` 脏标记，`scheduler_loop` 在 15s 轮询内检测到则置 `next_broadcast=None` 强制重算；③ `popup_win.show_popup(font_scale=...)` 下次播报采用新字号。
 - PRD 规划的 V1.0（内网服务端版）尚未开始：内网 REST 服务端（FastAPI+SQLite）、教师端 Web 页面、台账同步等。小程序本阶段不考虑。
-- MVP 待办优先级：P0 DPI自适应+弹窗改进（已完成）→ P1 设置界面+配置扩展（已完成）→ P2 开机自启（已完成）+Excel导出 → P3 exe打包（已完成：`script/build_exe.bat`，PyInstaller **onefile**+windowed 单文件约 7MB；可写数据统一在 `%APPDATA%\SafetyCast\`（`config_store.DATA_DIR`，冻结态解析+旧 exe-旁数据一次性迁移、只拷不删不覆盖；开发态仍用项目目录随仓库走）；app.ico 经 --add-data 内嵌、exe 旁同名文件优先；曾在 onedir 模式下用户单独搬动 exe 报「找不到 python313.dll」，onedir 必须整文件夹搬运，故改 onefile）。
+- MVP 待办优先级：P0 DPI自适应+弹窗改进（已完成）→ P1 设置界面+配置扩展（已完成）→ P2 开机自启（已完成）+CSV台账记录（已完成）→ P3 exe打包（已完成：`script/build_exe.bat`，PyInstaller **onefile**+windowed 单文件约 7MB；可写数据统一在 `%APPDATA%\SafetyCast\`（`config_store.DATA_DIR`，冻结态解析+旧 exe-旁数据一次性迁移、只拷不删不覆盖；开发态仍用项目目录随仓库走）；app.ico 经 --add-data 内嵌、exe 旁同名文件优先；曾在 onedir 模式下用户单独搬动 exe 报「找不到 python313.dll」，onedir 必须整文件夹搬运，故改 onefile）。
 - 修改弹窗/托盘代码时，保持"结构体在前、argtypes 在后"的书写顺序。

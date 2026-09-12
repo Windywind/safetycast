@@ -79,7 +79,7 @@ except Exception as e:
 # ---------- 配置 ----------
 # CONFIG 是 config_store.CONFIG 的**同一个 dict 对象引用**。设置界面保存后
 # config_store.apply() 原地 clear()+update()，因此本文件所有「调用时取值」的
-# 读取点（dismissal_datetime / today_broadcast_time / pick_content / _new_engine /
+# 读取点（dismissal_datetime / plan_today / pick_content / _new_engine /
 # _run_broadcast / scheduler_loop）一行都不用改即可热生效。
 # 加载失败（文件缺失、JSON 损坏）由 config_store.load 容错回退默认值并经 _dbg 上报，
 # 不再像旧 load_config 那样直接抛异常导致启动 fatal。
@@ -104,9 +104,11 @@ def apply_config(clean: dict):
     config_store.apply(clean)
     _config_dirty.set()
     voice = clean.get("tts_voice") or {}
+    out = clean.get("tts_output_device") or {}
     _dbg(f"[config] 已保存并热生效：放学 {clean.get('dismissal_time')}，"
          f"字号 {clean.get('popup_font_scale')}%，语速 {clean.get('tts_rate')}，"
-         f"音量 {clean.get('tts_volume')}，音色 {voice.get('name') or '系统默认'}")
+         f"音量 {clean.get('tts_volume')}，音色 {voice.get('name') or '系统默认'}，"
+         f"输出 {out.get('name') or '系统默认'}")
 
 def dismissal_datetime(now: datetime.datetime) -> datetime.datetime:
     h, m = CONFIG["dismissal_time"].split(":")
@@ -120,29 +122,60 @@ def is_last_school_day_before_holiday(date, holidays):
     tomorrow = date + datetime.timedelta(days=1)
     return not is_holiday(date, holidays) and is_holiday(tomorrow, holidays)
 
-def today_broadcast_time(now: datetime.datetime) -> datetime.datetime | None:
-    """返回今天应触发的播报时间；若已错过返回 None。"""
+_RULE_PRIORITY = ("holiday", "friday", "daily")
+
+
+def _rule_title(kind: str) -> str:
+    """返回规则显示标题；配置缺失/为空时回退到 kind 本身。"""
+    try:
+        title = str(CONFIG["rules"][kind].get("title") or "").strip()
+        return title or kind
+    except Exception:
+        return kind
+
+
+def plan_today(now: datetime.datetime) -> tuple[str | None, list]:
+    """规划今天「播什么 / 哪些规则被跳过」，取代旧的互斥单选。
+
+    返回 (primary, skipped)：
+    - primary：今天实际要播报的类型（holiday/friday/daily），None 表示不播；
+    - skipped：[(kind, reason), ...] 需要写入「跳过」台账的条目。
+
+    语义（1530 逐日留痕口径）：
+    - 每天以优先级 holiday > friday > daily 取最高命中者为当天唯一播报；
+    - 更低优先级但同样命中（enabled 且时间要件满足）的规则，记为「被覆盖」跳过；
+    - 假期当天 / 周末 / 规则全未启用等不播场景，也各记一条跳过。
+    """
     rules = CONFIG["rules"]
     holidays = CONFIG.get("upcoming_holidays", [])
-    if is_holiday(now.date(), holidays):
-        return None  # 假期当天停课不播
-    base = dismissal_datetime(now)
-    weekend = now.weekday() >= 5
-    holiday = is_last_school_day_before_holiday(now.date(), holidays)
+    date = now.date()
 
-    # 优先级：假期前最后教学日 > 周五 > 每日；周末不播每日
-    if holiday and rules["holiday"]["enabled"]:
-        t = base - datetime.timedelta(minutes=rules["holiday"]["lead_minutes"])
-        kind = "holiday"
-    elif now.weekday() == 4 and rules["friday"]["enabled"]:
-        t = base - datetime.timedelta(minutes=rules["friday"]["lead_minutes"])
-        kind = "friday"
-    elif not weekend and rules["daily"]["enabled"]:
-        t = base - datetime.timedelta(minutes=rules["daily"]["lead_minutes"])
-        kind = "daily"
-    else:
-        return None
-    return t if t > now else None
+    if is_holiday(date, holidays):
+        return None, [("holiday", "假期当天停课")]
+
+    weekday = now.weekday()
+    weekend = weekday >= 5
+    last_day = is_last_school_day_before_holiday(date, holidays)
+
+    active = {
+        "holiday": rules["holiday"]["enabled"] and last_day,
+        "friday": rules["friday"]["enabled"] and weekday == 4,
+        "daily": rules["daily"]["enabled"] and not weekend,
+    }
+
+    primary = next((k for k in _RULE_PRIORITY if active[k]), None)
+
+    if primary is None:
+        if weekend:
+            return None, [("daily", "周末停课")]
+        return None, [("daily", "规则未启用")]
+
+    skipped = []
+    for k in _RULE_PRIORITY[_RULE_PRIORITY.index(primary) + 1:]:
+        if active[k]:
+            skipped.append((k, f"被「{_rule_title(primary)}」覆盖"))
+
+    return primary, skipped
 
 def pick_content(kind: str, now: datetime.datetime) -> tuple[str, str]:
     rules = CONFIG["rules"]
@@ -162,6 +195,17 @@ def log_broadcast(kind: str, title: str, text: str, status: str):
             w.writerow(["时间", "类型", "标题", "内容", "状态"])
         w.writerow([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), kind, title, text.replace("\n", " "), status])
     print(f"[log] {kind} {status}: {title}")
+
+
+def log_skip(kind: str, reason: str):
+    """落一条「跳过」台账：某规则今天本应触发但未播，写明原因供迎检自证非漏播。"""
+    log_broadcast(kind, _rule_title(kind), "", "跳过：" + reason)
+
+
+def _write_skips(skipped):
+    """批量写跳过记录；skipped 为 [(kind, reason), ...]，可为空。"""
+    for kind, reason in skipped or []:
+        log_skip(kind, reason)
 
 # ---------- TTS ----------
 
@@ -254,6 +298,47 @@ def list_voices() -> list:
     return list(voices)
 
 
+# 输出设备枚举结果缓存：同 list_voices，枚举要新建 SpVoice（数十毫秒级）。
+_output_devices_cache: list | None = None
+_output_devices_lock = threading.Lock()
+
+
+def list_output_devices() -> list:
+    """枚举本机 SAPI 音频输出设备，返回 [(id, name), ...]，结果按进程缓存。
+
+    id 是 SAPI AudioOutput 的 token 路径（MMAudioOut 注册表项），换机器后可能失效，
+    故同时返回 name 供界面显示；空 id 表示「系统默认」。
+    枚举失败返回空列表，绝不抛异常（设置界面据此只显示「系统默认」一项）。
+    """
+    global _output_devices_cache
+    with _output_devices_lock:
+        if _output_devices_cache is not None:
+            return list(_output_devices_cache)
+
+    devices = []
+    try:
+        with _com_apartment():
+            tts = comtypes.client.CreateObject("SAPI.SpVoice")
+            outs = tts.GetAudioOutputs("", "")
+            for i in range(outs.Count):
+                token = outs.Item(i)
+                did = str(token.Id or "").strip()
+                if not did:
+                    continue
+                try:
+                    name = str(token.GetDescription() or "").strip()
+                except Exception:
+                    name = ""
+                devices.append((did, name or did))
+    except Exception as e:
+        _dbg(f"[tts] 枚举输出设备失败，仅提供系统默认：{e}")
+
+    with _output_devices_lock:
+        _output_devices_cache = devices
+    _dbg(f"[tts] 本机音频输出设备 {len(devices)} 个")
+    return list(devices)
+
+
 # wpm → SAPI Rate(-10..10) 换算基准，与 pyttsx3 sapi5 驱动的注册表默认值一致
 # （E_REG ...\\MSMARY：a=156.63，b=1.11），保证既有 tts_rate 配置语义不变：
 # Rate = log(wpm / a) / log(b)，如 175wpm ≈ Rate 1。
@@ -269,14 +354,20 @@ def _wpm_to_sapi_rate(wpm) -> int:
 
 
 def _new_voice(rate: int | None = None, volume: float | None = None,
-               voice_id: str | None = None):
+               voice_id: str | None = None,
+               output_device_id: str | None = None):
     """新建 SAPI SpVoice 并套用参数；参数为 None 时取 CONFIG 当前值。
 
-    每次播报都新建（踩坑 #6），CONFIG 热更新后的语速/音量/音色下次播报自然生效。
+    每次播报都新建（踩坑 #6），CONFIG 热更新后的语速/音量/音色/输出设备下次播报
+    自然生效。
 
-    音色容错：配置的 id 不在本机枚举结果中时**跳过**音色选择（回落系统默认）
-    并记一行日志，绝不抛异常 —— 教室换机器后语音包不同是常态，
+    容错：配置的音色 / 输出设备 id 不在本机枚举结果中时**跳过**选择（回落系统默认）
+    并记一行日志，绝不抛异常 —— 教室换机器后语音包/声卡不同是常态，
     而任何异常都可能导致整次安全播报静音。
+
+    输出设备是 2026-09 排查后新增：SAPI 默认输出不跟随 Windows「默认播放设备」，
+    死绑在第一块物理声卡上 —— 老师切到 Steam Streaming Speakers 后 TTS 仍从物理
+    音箱出声，远程串流听不到。故这里按配置显式设置 AudioOutput。
     """
     if voice_id is None:
         configured = CONFIG.get("tts_voice") or {}
@@ -285,6 +376,14 @@ def _new_voice(rate: int | None = None, volume: float | None = None,
     else:
         wanted = str(voice_id or "").strip()
         label = wanted
+
+    if output_device_id is None:
+        out_cfg = CONFIG.get("tts_output_device") or {}
+        wanted_out = str(out_cfg.get("id") or "").strip()
+        out_label = str(out_cfg.get("name") or "").strip() or wanted_out
+    else:
+        wanted_out = str(output_device_id or "").strip()
+        out_label = wanted_out
 
     if wanted and wanted not in {vid for vid, _ in list_voices()}:
         _dbg(f"[tts] 音色本机不存在（{label}），改用系统默认")
@@ -307,12 +406,24 @@ def _new_voice(rate: int | None = None, volume: float | None = None,
                 _dbg(f"[tts] 未找到音色 token（{label}），改用系统默认")
         except Exception as e:
             _dbg(f"[tts] 设置音色失败（{label}），改用系统默认：{e}")
+    if wanted_out:
+        try:
+            outs = tts.GetAudioOutputs("", "")
+            for i in range(outs.Count):
+                token = outs.Item(i)
+                if str(token.Id or "") == wanted_out:
+                    tts.AudioOutput = token
+                    break
+            else:
+                _dbg(f"[tts] 未找到输出设备 token（{out_label}），改用系统默认")
+        except Exception as e:
+            _dbg(f"[tts] 设置输出设备失败（{out_label}），改用系统默认：{e}")
     return tts
 
 
 def speak(text: str, stop_event: threading.Event | None = None,
           rate: int | None = None, volume: float | None = None,
-          voice_id: str | None = None):
+          voice_id: str | None = None, output_device_id: str | None = None):
     """逐句朗读（SAPI 同步 Speak）；stop_event 置位后返回（关窗即静音）。
 
     **为什么不用 pyttsx3 的 say/runAndWait**（2026-09-08 用户实测 bug：
@@ -325,8 +436,8 @@ def speak(text: str, stop_event: threading.Event | None = None,
     - 原生 SAPI **同步** Speak 连念 4 句全部出声（每句 1.5~2.5s），故直连 comtypes。
 
     同步 Speak 会阻塞到本句念完，句间检查停止标志，最坏延迟一段（约 5 秒），
-    与原设计一致。rate / volume / voice_id 为 None 时取 CONFIG 当前值；
-    试听会显式传入设置界面表单里**尚未保存**的值，故不能走 CONFIG。
+    与原设计一致。rate / volume / voice_id / output_device_id 为 None 时取
+    CONFIG 当前值；试听会显式传入设置界面表单里**尚未保存**的值，故不能走 CONFIG。
     """
     stop = stop_event if stop_event is not None else threading.Event()
     tts = None
@@ -336,7 +447,7 @@ def speak(text: str, stop_event: threading.Event | None = None,
                 break
             try:
                 if tts is None:
-                    tts = _new_voice(rate, volume, voice_id)
+                    tts = _new_voice(rate, volume, voice_id, output_device_id)
                 tts.Speak(sent)
             except Exception as e:
                 _dbg(f"[tts] 第 {i + 1} 句失败，重建 SpVoice 重试：{e}")
@@ -344,7 +455,7 @@ def speak(text: str, stop_event: threading.Event | None = None,
                 if stop.is_set():
                     break
                 try:
-                    tts = _new_voice(rate, volume, voice_id)
+                    tts = _new_voice(rate, volume, voice_id, output_device_id)
                     tts.Speak(sent)
                 except Exception as e2:
                     _dbg(f"[tts] sentence dropped: {e2}")
@@ -377,7 +488,7 @@ def is_broadcast_running() -> bool:
 
 
 def preview_speak(text: str, rate: int, volume: float, voice_id: str,
-                  stop_event: threading.Event) -> bool:
+                  output_device_id: str, stop_event: threading.Event) -> bool:
     """试听：用设置界面表单里**尚未保存**的参数念一段真实播报内容。
 
     刻意**不抢** _broadcast_lock —— 若抢了，老师试听期间到点的正式播报会被
@@ -393,7 +504,8 @@ def preview_speak(text: str, rate: int, volume: float, voice_id: str,
         _dbg("[preview] 已有试听在进行，忽略本次")
         return False
     try:
-        speak(text, stop_event, rate=rate, volume=volume, voice_id=voice_id)
+        speak(text, stop_event, rate=rate, volume=volume, voice_id=voice_id,
+              output_device_id=output_device_id)
         return True
     except Exception:
         _dbg("[preview] error:\n" + traceback.format_exc())
@@ -483,49 +595,70 @@ def _scheduler_wait(seconds: float):
 
 
 def scheduler_loop():
-    next_broadcast = None
+    next_broadcast = None   # 当天主播报的触发时刻（已规划且未到点才非 None）
+    plan_kind = None        # 主播报类型（holiday/friday/daily）
+    plan_skipped = None     # [(kind, reason), ...] 随播报一起补记的「被覆盖」跳过项
+    settled_date = None     # 已「播报/跳过结算」完成的日期，防止同一天重复落账
+
+    def wait_next_day(now):
+        """睡到明天 00:05；中途配置变更会提前返回。"""
+        tomorrow = (now + datetime.timedelta(days=1)).replace(
+            hour=0, minute=5, second=0, microsecond=0)
+        _scheduler_wait(min((tomorrow - now).total_seconds(), 3600))
+
     while not _scheduler_stop.is_set():
         now = datetime.datetime.now()
-        # 配置热更新后强制重算。next_broadcast 是局部缓存，其重算条件
-        # （跨日 / 进入提前 20 小时窗口）在「只改了放学时间」时三个分支全不成立，
-        # 不显式置 None 的话旧时刻会一直挂到跨日才更新。
-        # apply_config 是先改 CONFIG 再 set 脏标记，故此处重算必定读到新配置。
+
+        # 配置热更新后强制重算。规划状态是局部缓存，「只改放学时间」时旧条件
+        # 判断不成立、会一直挂到跨日，故必须显式清空。apply_config 先改 CONFIG
+        # 再置脏标记，因此这里重算必定读到新配置。
         if _config_dirty.is_set():
             _config_dirty.clear()
             next_broadcast = None
-            _dbg("[scheduler] 配置已变更，重算下次播报时间（放学 "
+            plan_kind = None
+            plan_skipped = None
+            settled_date = None
+            _dbg("[scheduler] 配置已变更，重算下次播报（放学 "
                  f"{CONFIG['dismissal_time']}）")
-        if next_broadcast is None or now.date() != next_broadcast.date() or now < next_broadcast - datetime.timedelta(hours=20):
-            t = today_broadcast_time(now)
-            if t is None:
-                # 计算明天再查，避免忙等
-                tomorrow = now + datetime.timedelta(days=1)
-                tomorrow = tomorrow.replace(hour=0, minute=5, second=0, microsecond=0)
-                next_broadcast = None
-                wait = (tomorrow - now).total_seconds()
-                print(f"[scheduler] 今日无播报，{tomorrow} 再检查")
-                _scheduler_wait(min(wait, 3600))
+
+        # 首次 / 跨日：规划今天播什么、哪些规则被跳过
+        if settled_date != now.date() and next_broadcast is None:
+            primary, skipped = plan_today(now)
+
+            if primary is None:
+                # 假期当天 / 周末 / 规则全未启用：不播，但留痕「跳过」
+                _write_skips(skipped)
+                settled_date = now.date()
+                _dbg("[scheduler] 今日不播（跳过已留痕），明日再查")
+                wait_next_day(now)
                 continue
+
+            lead = CONFIG["rules"][primary]["lead_minutes"]
+            t = dismissal_datetime(now) - datetime.timedelta(minutes=lead)
+            if t <= now:
+                # 放学后才启动 / 休眠醒来已过点：不补播，但留痕「过时」
+                _write_skips([(primary, "已过放学时间，未播")] + skipped)
+                settled_date = now.date()
+                _dbg("[scheduler] 已过放学时间，不补播（跳过已留痕）")
+                wait_next_day(now)
+                continue
+
+            plan_kind = primary
+            plan_skipped = skipped
             next_broadcast = t
-            print(f"[scheduler] 下次播报: {next_broadcast} ({CONFIG['dismissal_time']} 放学)")
-        if now >= next_broadcast:
-            # 判断类型并执行（假期当天不播）
-            holidays = CONFIG.get("upcoming_holidays", [])
-            if is_holiday(now.date(), holidays):
-                print("[scheduler] 今天是假期，不播报")
-                tomorrow = (now + datetime.timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
-                next_broadcast = tomorrow
-                continue
-            if is_last_school_day_before_holiday(now.date(), holidays):
-                kind = "holiday"
-            elif now.weekday() == 4:
-                kind = "friday"
-            else:
-                kind = "daily"
-            do_broadcast(kind)
-            tomorrow = (now + datetime.timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
-            next_broadcast = tomorrow
+            print(f"[scheduler] 下次播报: {next_broadcast:%H:%M} "
+                  f"({_rule_title(primary)}，{CONFIG['dismissal_time']} 放学)")
+
+        if next_broadcast is not None and now >= next_broadcast:
+            do_broadcast(plan_kind)
+            _write_skips(plan_skipped)   # 被覆盖的低优先级规则随播报一并留痕
+            settled_date = now.date()
+            next_broadcast = None
+            plan_kind = None
+            plan_skipped = None
+            wait_next_day(now)
             continue
+
         _scheduler_wait(15)
 
 # ---------- 托盘 ----------
@@ -563,8 +696,9 @@ def open_settings():
     """打开设置窗口。
 
     **延迟导入** settings_win：它要读配置、调 TTS，若与本模块在模块级互相 import
-    即成环。改为由本函数注入 on_apply / preview_speak / list_voices / is_busy 四个
-    回调，settings_win 只依赖 config_store，可独立测试，且不存在任何导入环。
+    即成环。改为由本函数注入 on_apply / preview_speak / list_voices /
+    list_output_devices / is_busy 五个回调，settings_win 只依赖 config_store，
+    可独立测试，且不存在任何导入环。
 
     本函数由托盘 _fire() 在后台 daemon 线程调用 —— 正好满足「Win32 消息循环必须在
     创建窗口的线程跑」（踩坑 #9）：各线程 GetMessageW(hwnd=None) 只取本线程窗口消息，
@@ -580,6 +714,7 @@ def open_settings():
             on_apply=apply_config,
             preview_speak=preview_speak,
             list_voices=list_voices,
+            list_output_devices=list_output_devices,
             is_busy=is_broadcast_running,
         )
     except Exception:

@@ -94,12 +94,16 @@ HOLD_SECONDS_RANGE = (5, 300)
 TITLE_MAX_LEN = 30
 
 DEFAULT_VOICE_NAME = "系统默认"
+DEFAULT_OUTPUT_NAME = "系统默认"
 
 DEFAULT_CONFIG = {
     "dismissal_time": "16:30",
     "tts_rate": 175,
     "tts_volume": 1.0,
     "tts_voice": {"id": "", "name": DEFAULT_VOICE_NAME},
+    # 音频输出设备（声卡）。默认空 = SAPI 默认输出；用户可在设置界面改选
+    # 为 Steam Streaming Speakers 等其它枚举到的设备。
+    "tts_output_device": {"id": "", "name": DEFAULT_OUTPUT_NAME},
     "popup_min_hold_seconds": 12,
     # 字号是「缩放百分比」而非绝对像素：乘到 popup_win 按屏幕物理像素算出的
     # title_em / body_em 上，既给老师调节权，又保留 DPI 自适应与长文本自动收缩。
@@ -243,22 +247,32 @@ def _norm_bool(value) -> bool:
     return bool(value)
 
 
-def _norm_voice(value) -> dict:
-    """归一为 {"id": str, "name": str}；空值回退「系统默认」。
+def _norm_device(value, default_name: str) -> dict:
+    """归一为 {"id": str, "name": str}；空值回退 default_name。
 
-    同时存 id 与 name：id 用于匹配 SAPI 音色 token（SpVoice.Voice），name 用于
-    换机器后 id 失效时的日志提示与模糊匹配兜底。
+    同时存 id 与 name：id 用于匹配 SAPI 设备 token（SpVoice.Voice / AudioOutput），
+    name 用于换机器后 id 失效时的日志提示与模糊匹配兜底。
 
     入参经 merge_defaults 后必为 dict（类型不符者已被上游防御回退），此处只兜底空值。
     """
     if not isinstance(value, dict):
-        return {"id": "", "name": DEFAULT_VOICE_NAME}
+        return {"id": "", "name": default_name}
 
-    voice_id = str(value.get("id") or "").strip()
+    device_id = str(value.get("id") or "").strip()
     name = str(value.get("name") or "").strip()
-    if not voice_id:
-        return {"id": "", "name": DEFAULT_VOICE_NAME}
-    return {"id": voice_id, "name": name or voice_id}
+    if not device_id:
+        return {"id": "", "name": default_name}
+    return {"id": device_id, "name": name or device_id}
+
+
+def _norm_voice(value) -> dict:
+    """归一音色；id 为空回退「系统默认」。"""
+    return _norm_device(value, DEFAULT_VOICE_NAME)
+
+
+def _norm_output_device(value) -> dict:
+    """归一音频输出设备；id 为空回退「系统默认」（即 SAPI 默认输出）。"""
+    return _norm_device(value, DEFAULT_OUTPUT_NAME)
 
 
 def validate(raw) -> tuple:
@@ -313,6 +327,8 @@ def validate(raw) -> tuple:
         DEFAULT_CONFIG["tts_volume"], as_int=False)
 
     data["tts_voice"] = _norm_voice(data.get("tts_voice"))
+
+    data["tts_output_device"] = _norm_output_device(data.get("tts_output_device"))
 
     if errors:
         return None, errors

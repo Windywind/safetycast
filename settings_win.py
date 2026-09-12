@@ -128,6 +128,7 @@ ID_FONT = 23
 ID_RATE = 24
 ID_VOLUME = 25
 ID_VOICE = 26
+ID_OUTPUT = 28
 ID_AUTOSTART = 27
 ID_RULE_BASE = 100      # 每条规则占 3 个：enabled / lead / title
 
@@ -218,6 +219,7 @@ FONT_SCALE_LABELS = ("90%（较小）", "100%（标准）", "115%（较大）",
 TTS_RATE_LABELS = ("较慢", "慢", "标准", "快", "较快")
 TTS_VOLUME_LABELS = ("50%", "70%", "85%", "100%（最大）")
 DEFAULT_VOICE_LABEL = "系统默认（跟随 Windows）"
+DEFAULT_OUTPUT_LABEL = "系统默认"
 
 # 校验失败时按关键词把焦点送到出错控件（值为 self.ctl 的逻辑名）
 _FOCUS_HINTS = (
@@ -444,10 +446,12 @@ def _make_font(em_h: int, bold: bool = False):
 class SettingsWindow:
     """单页分组设置窗口。一个实例对应一个窗口，跑完消息循环即废弃。"""
 
-    def __init__(self, on_apply, preview_speak, list_voices, is_busy=None):
+    def __init__(self, on_apply, preview_speak, list_voices, is_busy=None,
+                 list_output_devices=None):
         self._on_apply = on_apply
         self._preview_speak = preview_speak
         self._list_voices = list_voices
+        self._list_output_devices = list_output_devices
         self._is_busy = is_busy
 
         self.scale = _dpi_scale()
@@ -466,6 +470,7 @@ class SettingsWindow:
         self.hwnd_content = None
         self.ctl: dict = {}            # 逻辑名 -> 控件 HWND
         self._voice_items: list = []   # [(id, name), ...]，索引与音色下拉框严格对应
+        self._output_items: list = []  # [(id, name), ...]，索引与输出设备下拉框严格对应
         self._content_h = 0
         self._scroll_pos = 0
         self._hint_h: dict = {}      # key -> 实测换行高（逻辑像素），开窗期间缓存
@@ -593,7 +598,7 @@ class SettingsWindow:
             GROUP_TITLE_H + hh["holiday_hint"] + 4 + HOLIDAY_EDIT_H + GROUP_PAD_BOTTOM,
             GROUP_TITLE_H + max(ROW_H, hh["font_hint"])
             + max(ROW_H, hh["hold_hint"]) + GROUP_PAD_BOTTOM,
-            GROUP_TITLE_H + ROW_H * 2 + max(BTN_H, hh["preview_hint"])
+            GROUP_TITLE_H + ROW_H * 3 + max(BTN_H, hh["preview_hint"])
             + GROUP_PAD_BOTTOM,
             GROUP_TITLE_H + ROW_H + GROUP_PAD_BOTTOM,   # 组 6：启动
         )
@@ -710,6 +715,47 @@ class SettingsWindow:
             vid, name = "", config_store.DEFAULT_VOICE_NAME
         return {"id": vid, "name": name}
 
+    # ---- 输出设备下拉 ----
+
+    def _fill_outputs(self, current: dict):
+        """枚举本机音频输出设备填充下拉框，首项固定为「系统默认」。
+
+        枚举失败时只剩首项，界面照常可用。id 已不在本机（换机器）时回落首项并提示，
+        与音色下拉同一套容错思路。
+        """
+        hwnd = self.ctl["output"]
+        self._output_items = [("", config_store.DEFAULT_OUTPUT_NAME)]
+        if self._list_output_devices is not None:
+            try:
+                for did, name in (self._list_output_devices() or []):
+                    self._output_items.append((str(did), str(name)))
+            except Exception:
+                _dbg("[settings] 输出设备枚举回调异常:\n" + traceback.format_exc())
+
+        self._cb_fill(hwnd, [DEFAULT_OUTPUT_LABEL if i == 0 else name
+                             for i, (_, name) in enumerate(self._output_items)])
+
+        wanted = str((current or {}).get("id") or "").strip()
+        idx = 0
+        if wanted:
+            for i, (did, _) in enumerate(self._output_items):
+                if did == wanted:
+                    idx = i
+                    break
+            else:
+                label = str((current or {}).get("name") or wanted)
+                _dbg(f"[settings] 配置输出设备本机不存在（{label}），界面回落系统默认")
+        self._cb_select(hwnd, idx)
+        _dbg(f"[settings] 输出设备下拉共 {len(self._output_items)} 项，选中第 {idx} 项")
+
+    def _current_output(self) -> dict:
+        idx = self._cb_index(self.ctl["output"])
+        if 0 <= idx < len(self._output_items):
+            did, name = self._output_items[idx]
+        else:
+            did, name = "", config_store.DEFAULT_OUTPUT_NAME
+        return {"id": did, "name": name}
+
     # ---- 表单构建 ----
 
     def _build_form(self):
@@ -794,12 +840,18 @@ class SettingsWindow:
 
         # 组 5：语音（试听行提示可能换行成两行，行高取实测）
         r3 = max(BTN_H, hh["preview_hint"])
-        y, y_next = self._group(y, "语音", ROW_H * 2 + r3)
+        y, y_next = self._group(y, "语音", ROW_H * 3 + r3)
         self._label("音色", INNER_X, y, 70)
         self.ctl["voice"] = self._combo(INNER_X + 76, y, INNER_W - 76, ID_VOICE)
         self._fill_voices(cfg.get("tts_voice") or {})
 
-        row2 = y + ROW_H
+        row_out = y + ROW_H
+        self._label("输出设备", INNER_X, row_out, 70)
+        self.ctl["output"] = self._combo(INNER_X + 76, row_out, INNER_W - 76,
+                                         ID_OUTPUT)
+        self._fill_outputs(cfg.get("tts_output_device") or {})
+
+        row2 = y + ROW_H * 2
         self._label("语速", INNER_X, row2, 70)
         self.ctl["rate"] = self._combo(INNER_X + 76, row2, 150, ID_RATE)
         self._cb_fill(self.ctl["rate"], TTS_RATE_LABELS)
@@ -811,7 +863,7 @@ class SettingsWindow:
         self._cb_select_tier(self.ctl["volume"], config_store.TTS_VOLUME_TIERS,
                              cfg.get("tts_volume"), defaults["tts_volume"])
 
-        row3 = y + ROW_H * 2
+        row3 = y + ROW_H * 3
         self.ctl["preview"] = self._create(
             "Button", "试听", BS_PUSHBUTTON, INNER_X, row3, 90, BTN_H, ID_PREVIEW)
         self.ctl["preview_stop"] = self._create(
@@ -853,6 +905,7 @@ class SettingsWindow:
         self._cb_select_tier(self.ctl["volume"], config_store.TTS_VOLUME_TIERS,
                              d["tts_volume"], d["tts_volume"])
         self._cb_select(self.ctl["voice"], 0)
+        self._cb_select(self.ctl["output"], 0)
         _dbg("[settings] 已恢复默认值到表单（未落盘）")
 
     def _collect(self) -> dict:
@@ -879,6 +932,7 @@ class SettingsWindow:
             "tts_rate": self._tier_value("rate", config_store.TTS_RATE_TIERS),
             "tts_volume": self._tier_value("volume", config_store.TTS_VOLUME_TIERS),
             "tts_voice": self._current_voice(),
+            "tts_output_device": self._current_output(),
         })
         return raw
 
@@ -1274,15 +1328,17 @@ class SettingsWindow:
         rate = self._tier_value("rate", config_store.TTS_RATE_TIERS)
         volume = self._tier_value("volume", config_store.TTS_VOLUME_TIERS)
         voice_id = self._current_voice()["id"]
+        output_id = self._current_output()["id"]
         text = self._sample_text()
         self._preview_stop.clear()
         self._set_preview_buttons(running=True)
         _dbg(f"[settings] 开始试听 rate={rate} volume={volume} "
-             f"voice={voice_id or '系统默认'}")
+             f"voice={voice_id or '系统默认'} output={output_id or '系统默认'}")
 
         def _run():
             try:
-                self._preview_speak(text, rate, volume, voice_id, self._preview_stop)
+                self._preview_speak(text, rate, volume, voice_id, output_id,
+                                    self._preview_stop)
             except Exception:
                 _dbg("[settings] 试听失败:\n" + traceback.format_exc())
             finally:
@@ -1361,17 +1417,20 @@ def _dispatch(hwnd, msg, wparam, lparam):
 _GLOBAL_WNDPROC = WNDPROC(_dispatch)
 
 
-def show_settings(on_apply, preview_speak, list_voices, is_busy=None) -> None:
+def show_settings(on_apply, preview_speak, list_voices, is_busy=None,
+                  list_output_devices=None) -> None:
     """打开设置窗口并**阻塞直到关闭**。必须由后台线程调用（本函数内跑消息循环）。
 
     参数（依赖注入，本模块因此不必 import broadcast，也就没有循环导入）：
       on_apply(clean: dict) -> None
           校验通过后调用，由 broadcast 落盘 + 热应用 + 置调度器脏标记。
           在后台线程执行；抛异常则弹错误提示且窗口保持打开。
-      preview_speak(text, rate, volume, voice_id, stop_event) -> None
+      preview_speak(text, rate, volume, voice_id, output_device_id, stop_event) -> None
           试听。用表单当前值（尚未保存），故不能走 CONFIG。在后台线程执行。
       list_voices() -> list[tuple[str, str]]
           [(id, name), ...]。首项「系统默认」由本函数插入，回调不必包含。
+      list_output_devices() -> list[tuple[str, str]]
+          [(id, name), ...]。音频输出设备；首项「系统默认」由本函数插入。
       is_busy() -> bool
           可选。正式播报进行中时返回 True，试听按钮据此拒绝并提示。
 
@@ -1387,7 +1446,8 @@ def show_settings(on_apply, preview_speak, list_voices, is_busy=None) -> None:
             user32.SetForegroundWindow(inst.hwnd_main)
         return
 
-    inst = SettingsWindow(on_apply, preview_speak, list_voices, is_busy)
+    inst = SettingsWindow(on_apply, preview_speak, list_voices, is_busy,
+                          list_output_devices)
     _CURRENT = inst
     try:
         inst.run()
